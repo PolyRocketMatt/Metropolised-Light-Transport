@@ -31,10 +31,9 @@ void WavefrontPathIntegrator::UpdateFilm() {
                 // Call _Film::AddSample()_ with _VisibleSurface_ for pixel sample
                 VisibleSurface visibleSurface =
                     pixelSampleState.visibleSurface[pixelIndex];
-                film.AddSample(pPixel, Lw, lambda, &visibleSurface, filterWeight);
-
+                film.AddSample(pPixel, Lw, lambda, &visibleSurface, filterWeight, 0);
             } else
-                film.AddSample(pPixel, Lw, lambda, nullptr, filterWeight);
+                film.AddSample(pPixel, Lw, lambda, nullptr, filterWeight, 0);
         });
 }
 

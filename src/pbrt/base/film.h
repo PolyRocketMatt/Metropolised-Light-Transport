@@ -27,8 +27,10 @@ class Film : public TaggedPointer<RGBFilm, GBufferFilm, SpectralFilm> {
     // Film Interface
     PBRT_CPU_GPU inline void AddSample(Point2i pFilm, SampledSpectrum L,
                                        const SampledWavelengths &lambda,
-                                       const VisibleSurface *visibleSurface,
-                                       Float weight);
+                                       const VisibleSurface *visibleSurface, Float weight,
+                                       int evaluations);
+
+    PBRT_CPU_GPU inline void AddEvaluations(Point2i pFilm, int evaluations);
 
     PBRT_CPU_GPU inline Bounds2f SampleBounds() const;
 

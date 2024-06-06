@@ -338,13 +338,37 @@ Sampler MLTSampler::Clone(Allocator alloc) {
 }
 
 void MLTSampler::StartIteration() {
-    currentIteration++;
+    currentIteration++; 
     largeStep = rng.Uniform<Float>() < largeStepProbability;
 }
 
 void MLTSampler::Accept() {
-    if (largeStep)
+    if (largeStep) {
         lastLargeStepIteration = currentIteration;
+        acceptedLargeMut++;
+        proposedLargeMut++;
+    } else {
+        acceptedSmallMut++;
+        proposedSmallMut++;
+    }
+}
+
+void MLTSampler::UpdateLargeStep() {
+
+    //  Potentially optimise the large step probability
+    if (optimise) {
+        //  Recompute the new large step probability based on averages
+        Float averageSmallAcceptance =
+            static_cast<Float>(acceptedSmallMut) / proposedSmallMut;
+        Float averageLargeAcceptance =
+            static_cast<Float>(acceptedLargeMut) / proposedLargeMut;
+        largeStepProbability = std::max(
+            0.0f,
+            std::min(1.0f, averageSmallAcceptance / (2.0f * (averageSmallAcceptance -
+                                                             averageLargeAcceptance))));
+
+        LOG_VERBOSE("Large Step -> %f", largeStepProbability);
+    }
 }
 
 void MLTSampler::EnsureReady(int index) {
@@ -353,9 +377,17 @@ void MLTSampler::EnsureReady(int index) {
     return;
 #else
     // Enlarge _MLTSampler::X_ if necessary and get current $\VEC{X}_i$
-    if (index >= X.size())
+    if (index >= X.size()) {
         X.resize(index + 1);
+        discX.resize(index + 1);
+    }
+    
     PrimarySample &X_i = X[index];
+    bool isDiscrete = discX[index];
+
+    //  If a discrete value is to be updated, don't perform the update at all!
+    //if (isDiscrete)
+    //    return;
 
     // Reset $\VEC{X}_i$ if a large step took place in the meantime
     if (X_i.lastModificationIteration < lastLargeStepIteration) {
@@ -381,6 +413,11 @@ void MLTSampler::EnsureReady(int index) {
 }
 
 void MLTSampler::Reject() {
+    if (largeStep)
+        proposedLargeMut++;
+    else
+        proposedSmallMut++;
+
     for (auto &X_i : X)
         if (X_i.lastModificationIteration == currentIteration)
             X_i.Restore();

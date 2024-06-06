@@ -497,7 +497,9 @@ RGBFilm::RGBFilm(FilmBaseParameters p, const RGBColorSpace *colorSpace,
 }
 
 void RGBFilm::AddSplat(Point2f p, SampledSpectrum L, const SampledWavelengths &lambda) {
-    CHECK(!L.HasNaNs());
+    //CHECK(!L.HasNaNs());
+    if (L.HasNaNs())
+        return;
     // Convert sample radiance to _PixelSensor_ RGB
     RGB rgb = sensor->ToSensorRGB(L, lambda);
 
@@ -587,7 +589,7 @@ RGBFilm *RGBFilm::Create(const ParameterDictionary &parameters, Float exposureTi
 // GBufferFilm Method Definitions
 void GBufferFilm::AddSample(Point2i pFilm, SampledSpectrum L,
                             const SampledWavelengths &lambda,
-                            const VisibleSurface *visibleSurface, Float weight) {
+                            const VisibleSurface *visibleSurface, Float weight, int evaluations) {
     RGB rgb = sensor->ToSensorRGB(L, lambda);
     Float m = std::max({rgb.r, rgb.g, rgb.b});
     if (m > maxComponentValue)
@@ -638,6 +640,12 @@ void GBufferFilm::AddSample(Point2i pFilm, SampledSpectrum L,
     for (int c = 0; c < 3; ++c)
         p.rgbSum[c] += rgb[c] * weight;
     p.weightSum += weight;
+    p.evaluations += evaluations;
+}
+
+void GBufferFilm::AddEvaluations(Point2i pFilm, int evaluations) {
+    Pixel &p = pixels[pFilm];
+    p.evaluations += evaluations;
 }
 
 GBufferFilm::GBufferFilm(FilmBaseParameters p, const AnimatedTransform &outputFromRender,
@@ -659,7 +667,10 @@ GBufferFilm::GBufferFilm(FilmBaseParameters p, const AnimatedTransform &outputFr
 void GBufferFilm::AddSplat(Point2f p, SampledSpectrum v,
                            const SampledWavelengths &lambda) {
     // NOTE: same code as RGBFilm::AddSplat()...
-    CHECK(!v.HasNaNs());
+    //CHECK(!v.HasNaNs());
+    if (v.HasNaNs())
+        return;
+    
     RGB rgb = sensor->ToSensorRGB(v, lambda);
     Float m = std::max({rgb.r, rgb.g, rgb.b});
     if (m > maxComponentValue)
@@ -714,7 +725,8 @@ Image GBufferFilm::GetImage(ImageMetadata *metadata, Float splatScale) {
                  "Variance.B",
                  "RelativeVariance.R",
                  "RelativeVariance.G",
-                 "RelativeVariance.B"});
+                 "RelativeVariance.B",
+                 "Evaluations"});
 
     ImageChannelDesc rgbDesc = image.GetChannelDesc({"R", "G", "B"});
     ImageChannelDesc pDesc = image.GetChannelDesc({"P.X", "P.Y", "P.Z"});
@@ -728,8 +740,19 @@ Image GBufferFilm::GetImage(ImageMetadata *metadata, Float splatScale) {
         image.GetChannelDesc({"Variance.R", "Variance.G", "Variance.B"});
     ImageChannelDesc relVarianceDesc = image.GetChannelDesc(
         {"RelativeVariance.R", "RelativeVariance.G", "RelativeVariance.B"});
+    ImageChannelDesc evalDesc = image.GetChannelDesc({"Evaluations"});
 
     std::atomic<int> nClamped{0};
+
+    int maxEvals = 10000.0f;
+    //std::map<int, float> normalizedEvals;
+    //ParallelFor2D(pixelBounds, [&](Point2i p) { 
+    //    Pixel &pixel = pixels[p];
+    //    int evals = pixel.evaluations;
+    //    if (evals > maxEvals)
+    //        maxEvals = evals;
+    //});
+
     ParallelFor2D(pixelBounds, [&](Point2i p) {
         Pixel &pixel = pixels[p];
         RGB rgb(pixel.rgbSum[0], pixel.rgbSum[1], pixel.rgbSum[2]);
@@ -790,6 +813,11 @@ Image GBufferFilm::GetImage(ImageMetadata *metadata, Float splatScale) {
                           {pixel.rgbVariance[0].RelativeVariance(),
                            pixel.rgbVariance[1].RelativeVariance(),
                            pixel.rgbVariance[2].RelativeVariance()});
+        Float evalRatio =
+            static_cast<Float>(pixel.evaluations) / static_cast<Float>(maxEvals);
+        //Float evalRatio = static_cast<Float>(pixel.evaluations);
+
+        image.SetChannels(pOffset, evalDesc, {evalRatio});
     });
 
     if (nClamped.load() > 0)

@@ -782,7 +782,6 @@ PBRT_CPU_GPU SampledSpectrum SampleT_maj(Ray ray, Float tMax, Float u, RNG &rng,
                 }
                 T_maj = SampledSpectrum(1.f);
                 tMin = t;
-
             } else {
                 // Handle sample past end of majorant segment
                 Float dt = seg->tMax - tMin;
@@ -797,6 +796,701 @@ PBRT_CPU_GPU SampledSpectrum SampleT_maj(Ray ray, Float tMax, Float u, RNG &rng,
         }
     }
     return SampledSpectrum(1.f);
+}
+
+template <typename F>
+PBRT_CPU_GPU SampledSpectrum GenerateMajorant(int mode, Ray ray, Float tMax, Float u, RNG
+&rng, const SampledWavelengths &lambda, F callback) { auto sample = [&](auto medium) {
+        using M = typename std::remove_reference_t<decltype(*medium)>;
+        return GenerateMajorant<M>(mode, ray, tMax, u, rng, lambda, callback);
+    };
+    return ray.medium.Dispatch(sample);
+}
+
+/// <summary>
+/// Genereer de majorant die kan worden gebruikt als controleerbare optische dichtheid.
+/// </summary>
+/// <typeparam name="ConcreteMedium"></typeparam> 
+/// <typeparam name="F"></typeparam>
+/// <param name="mode"></param>     Strategie voor het genereren van de majorant
+/// <param name="ray"></param>      Lichtstraal om de set van mogelijke majoranten uit te bepalen
+/// <param name="tMax"></param>     Maximale afstand die kan worden afgelegd door de lichtstraal
+/// <param name="u"></param>        // Ongebruikt, nodig voor compilatie
+/// <param name="rng"></param>      // Ongebruikt, nodig voor compilatie
+/// <param name="lambda"></param>   Golflengten waarover de transmissie zal worden bepaald
+/// <param name="callback"></param> Functie die gebruikt wordt voor statistieken bij te houden
+/// <returns>De majorant die kan worden gebruikt als controleerbare optische dichtheid.</returns>
+template <typename ConcreteMedium, typename F>
+PBRT_CPU_GPU SampledSpectrum GenerateMajorant(int mode, Ray ray, Float tMax, Float u, RNG &rng,
+                                                 const SampledWavelengths &lambda,
+                                                 F callback) {
+    // Normalize ray direction and update _tMax_ accordingly
+    tMax *= Length(ray.d);
+    ray.d = Normalize(ray.d);
+
+    // Initialize _MajorantIterator_ for ray majorant sampling
+    ConcreteMedium *medium = ray.medium.Cast<ConcreteMedium>();
+    typename ConcreteMedium::MajorantIterator strategyIter =
+        medium->SampleRay(ray, tMax, lambda);
+
+    
+    SampledSpectrum majorant = (mode == 1) ? SampledSpectrum(1000.0f) : SampledSpectrum(0.f);
+    
+    if (mode == 4)
+        majorant = SampledSpectrum(1.0f);
+    
+    bool changedMin = false;
+    int segments = 0;
+    int zeros = 0;
+    while (true) {
+        pstd::optional<RayMajorantSegment> seg = strategyIter.Next();
+
+        if (!seg)
+            break;
+
+        Float segLength = seg->tMax - seg->tMin;
+        Float segRatio = segLength / tMax;
+        SampledSpectrum segMaj = seg->sigma_maj;
+
+        if (mode == 0 && segMaj[0] > majorant[0]) {
+            majorant = segMaj;
+        } else if (mode == 1) {
+            if (segMaj[0] < majorant[0] && segMaj[0] != 0.0f) {
+                majorant = segMaj;
+                changedMin = true;
+            }
+        } else if (mode == 2) {
+            majorant += segMaj;
+        } else if (mode == 3) {
+            SampledSpectrum addition = segRatio * segMaj;
+
+            majorant += addition;
+        }
+
+        if (segMaj[0] == 0.f)
+            zeros++;
+        segments++;
+    }
+
+    if (mode == 1 && !changedMin)
+        majorant = SampledSpectrum(1.0f);
+    if (mode == 2)
+        majorant /= segments;
+
+    return majorant;
+}
+
+/// <summary>
+/// Bemonster de transmissie tussen twee punten op een gegeven lichtstraal.
+/// </summary>
+/// <typeparam name="ConcreteMedium"></typeparam>   Implementatie van het medium in PBRT-v4
+/// <typeparam name="F"></typeparam>                // Ongebruikt, nodig voor compilatie
+/// <param name="mode"></param>                     Modus om de methode voor transmissiebenadering te kiezen
+/// <param name="alpha"></param>                    Resolutieparameter
+/// <param name="ray"></param>                      Lichtstraal waarover transmissie moet worden geschat
+/// <param name="medium"></param>                   Medium waardoor transmissie moet worden geschat
+/// <param name="tMin"></param>                     Minimale afstand op de lichtstraal
+/// <param name="tMax"></param>                     Maximale afstand op de lichtstraal
+/// <param name="rng"></param>                      Generator voor willekeurige getallen
+/// <param name="majorant"></param>                 Majorant gebruikt om de controleerbare optische dichtheid te bepalen
+/// <param name="lambda"></param>                   Golflengten waarover de transmissie zal worden bepaald
+/// <param name="callback"></param>                 Functie die gebruikt wordt voor statistieken bij te houden
+/// <returns>Transmissie tussen ray(tMin) en ray(tMax)</returns>
+template <typename ConcreteMedium, typename F>
+PBRT_CPU_GPU SampledSpectrum SampleTransmittance(int mode, float alpha, Ray ray, ConcreteMedium medium, Float tMin,
+    Float tMax, RNG& rng, SampledSpectrum majorant,
+    const SampledWavelengths& lambda, F callback) {    
+    SampledSpectrum transmittance = SampledSpectrum(0.f);
+    if (mode == 0)
+        transmittance = BruteForceTransmittanceEstimation(alpha, ray, medium, tMin, tMax,
+                                                          rng, lambda, callback);
+    else if (mode == 1)
+        transmittance = RatioTrackingTransmittanceEstimation(
+            alpha, ray, medium, tMin, tMax, rng, majorant, lambda, callback);
+    else if (mode == 2)
+        transmittance = BiasedTransmittanceEstimation(alpha, ray, medium, tMin, tMax, rng,
+                                                      majorant, lambda, callback);
+    else if (mode == 3)
+        transmittance = UnbiasedTransmittanceEstimation(alpha, ray, medium, tMin, tMax,
+                                                        rng, majorant, lambda, callback);
+    else if (mode == 5)
+        transmittance = DeltaTrackingTransmittanceEstimation(
+            alpha, ray, medium, tMin, tMax, rng, majorant, lambda, callback);
+
+    //  Clamp transmittance to not divide by zero!
+    if (transmittance[0] < 1e-4f)
+        transmittance = SampledSpectrum(1e-4f);
+    return transmittance;
+}
+
+template <typename F>
+PBRT_CPU_GPU SampledSpectrum SampleT_tr(int mode, float alpha, SampledSpectrum majorant, Ray ray, Float tMax, Float u, RNG &rng,
+                                         const SampledWavelengths &lambda, F callback) {
+    auto sample = [&](auto medium) {
+        using M = typename std::remove_reference_t<decltype(*medium)>;
+        return SampleT_tr<M>(mode, alpha, majorant, ray, tMax, u, rng, lambda, callback);
+    };
+    return ray.medium.Dispatch(sample);
+}
+
+/// <summary>
+/// Ongebruikt. Kan worden aangepast om ook transmissie te bepalen analoog aan Delta-Tracking.
+/// </summary>
+/// <typeparam name="ConcreteMedium"></typeparam>   // Ongebruikt
+/// <typeparam name="F"></typeparam>                // Ongebruikt
+/// <param name="mode"></param>                     // Ongebruikt
+/// <param name="alpha"></param>                    // Ongebruikt
+/// <param name="totalMajorant"></param>            // Ongebruikt
+/// <param name="ray"></param>                      // Ongebruikt
+/// <param name="tMax"></param>                     // Ongebruikt
+/// <param name="u"></param>                        // Ongebruikt
+/// <param name="rng"></param>                      // Ongebruikt
+/// <param name="lambda"></param>                   // Ongebruikt
+/// <param name="callback"></param>                 // Ongebruikt
+/// <returns>Ongebruikt</returns>                             
+template <typename ConcreteMedium, typename F>
+PBRT_CPU_GPU SampledSpectrum SampleT_tr(int mode, float alpha, SampledSpectrum totalMajorant, Ray ray, Float tMax, Float u, RNG &rng,
+                                         const SampledWavelengths &lambda, F callback) {
+    // Normalize ray direction and update _tMax_ accordingly
+    tMax *= Length(ray.d);
+    ray.d = Normalize(ray.d);
+
+    // Initialize _MajorantIterator_ for ray majorant sampling
+    ConcreteMedium *medium = ray.medium.Cast<ConcreteMedium>();
+    typename ConcreteMedium::MajorantIterator iter = medium->SampleRay(ray, tMax, lambda);
+    
+    //  Test
+    SampledSpectrum avgMajorant = GenerateMajorant(2, ray, tMax, u, rng, lambda, [&] {});
+    
+    Float lastReset = 0.0f;
+    SampledSpectrum transmittance(1.f);
+    bool done = false;
+    while (!done) {
+        pstd::optional<RayMajorantSegment> seg = iter.Next();
+        if (!seg)
+            return transmittance;
+        
+        Float segMin = seg->tMin;
+        Float segMax = seg->tMax;
+        SampledSpectrum majorant = seg->sigma_maj;
+        
+        if (majorant[0] == 0) {
+            Float dt = segMax - segMin;
+            if (IsInf(dt))
+                dt = std::numeric_limits<Float>::max();
+            transmittance *= FastExp(-dt * majorant);
+            continue;
+        }
+
+        Float tMin = segMin;
+        while (true) {
+            // Try to generate sample along current majorant segment
+            Float t = tMin + SampleExponential(u, majorant[0]);
+            u = rng.Uniform<Float>();
+            
+            if (t < segMax) {
+                transmittance *= FastExp(-(t - tMin) * majorant);
+                MediumProperties mp = medium->SamplePoint(ray(t), lambda);
+                
+                int evals = 0;
+                SampledSpectrum tr =
+                    SampleTransmittance(mode, alpha, ray, medium, lastReset, t, rng,
+                                        avgMajorant, lambda, [&](int evaluations) { 
+                            evals = evaluations;
+                        });
+
+                //LOG_VERBOSE("Delta: %f, Custom: %f", transmittance[0], tr[0]);
+                
+                if (!callback(ray(t), mp, majorant, transmittance, evals, avgMajorant)) {
+                    done = true;
+                    break;
+                }
+                
+                transmittance = SampledSpectrum(1.f);
+                tMin = t;
+                lastReset = t;
+            } 
+            
+            else {
+                Float dt = segMax - tMin;
+                if (IsInf(dt))
+                    dt = std::numeric_limits<Float>::max();
+                transmittance *= FastExp(-dt * majorant);
+                break;
+            }
+        }
+    }
+    return SampledSpectrum(1.f);
+}
+
+//  Transmittance Estimators
+
+/// <summary>
+/// Schatter voor transmissie op basis van ray-marching met willekeurige offset (Pauly et al.)
+/// </summary>
+/// <typeparam name="ConcreteMedium"></typeparam>   Implementatie van het medium in PBRT-v4
+/// <typeparam name="F"></typeparam>                // Ongebruikt, nodig voor compilatie
+/// <param name="alpha"></param>                    Resolutieparameter
+/// <param name="ray"></param>                      Lichtstraal waarover transmissie moet worden geschat
+/// <param name="medium"></param>                   Medium waardoor transmissie moet worden geschat
+/// <param name="tMin"></param>                     Minimale afstand op de lichtstraal
+/// <param name="tMax"></param>                     Maximale afstand op de lichtstraal
+/// <param name="rng"></param>                      Generator voor willekeurige getallen
+/// <param name="lambda"></param>                   Golflengten waarover de transmissie zal worden bepaald
+/// <param name="callback"></param>                 Functie die gebruikt wordt voor statistieken bij te houden
+/// <returns>Transmissie tussen ray(tMin) en ray(tMax)</returns>
+template <typename ConcreteMedium, typename F>
+PBRT_CPU_GPU inline SampledSpectrum BruteForceTransmittanceEstimation(
+    float alpha, Ray ray, ConcreteMedium medium, Float tMin, Float tMax, RNG &rng, const SampledWavelengths &lambda, F callback) {
+    //  Step 0. Normalize ray direction and update _tMax_ accordingly
+    tMax *= Length(ray.d);
+    ray.d = Normalize(ray.d);
+
+    //  Step 1. Determine the tuple size using the control optical thickness
+    int M = static_cast<int>(alpha * (tMax - tMin));
+    
+    //      FIX: Have at least 10 density lookups
+    M = std::max(M, 10);
+
+    //  Step 2. Compute random offset (Pauly et al. 2000)
+    Float u = rng.Uniform<Float>();
+
+    //  Step 3.1 Compute optical depth estimate using simple MC estimator
+    Float densitySampleFactor = tMax / M;
+    SampledSpectrum opticalThicknessEstimate(0.f);
+    for (int i = 0; i < M; i++) {
+        Float t = tMin + densitySampleFactor * (u + i);
+        MediumProperties mp = medium->SamplePoint(ray(t), lambda);
+        SampledSpectrum extinction = mp.sigma_a + mp.sigma_s;
+
+        opticalThicknessEstimate += extinction * densitySampleFactor;
+    }
+    
+    //  Step 4. Eval callback
+    callback(M);
+
+    //  Step 5. Transmittance = exp(-opticalThicknessEstimate)
+    return FastExp(-opticalThicknessEstimate);
+}
+
+/// <summary>
+/// Schatter voor transmissie op basis van ratio-tracking (Novak et al.)
+/// </summary>
+/// <typeparam name="ConcreteMedium"></typeparam>   Implementatie van het medium in PBRT-v4
+/// <typeparam name="F"></typeparam>                // Ongebruikt, nodig voor compilatie
+/// <param name="alpha"></param>                    Resolutieparameter
+/// <param name="ray"></param>                      Lichtstraal waarover transmissie moet worden geschat
+/// <param name="medium"></param>                   Medium waardoor transmissie moet worden geschat
+/// <param name="tMin"></param>                     Minimale afstand op de lichtstraal
+/// <param name="tMax"></param>                     Maximale afstand op de lichtstraal
+/// <param name="rng"></param>                      Generator voor willekeurige getallen
+/// <param name="lambda"></param>                   Golflengten waarover de transmissie zal worden bepaald
+/// <param name="callback"></param>                 Functie die gebruikt wordt voor statistieken bij te houden
+/// <returns>Transmissie tussen ray(tMin) en ray(tMax)</returns>
+template <typename ConcreteMedium, typename F>
+PBRT_CPU_GPU inline SampledSpectrum RatioTrackingTransmittanceEstimation(
+    float alpha, Ray ray, ConcreteMedium medium, Float tMin, Float tMax, RNG &rng,
+    SampledSpectrum majorant, const SampledWavelengths &lambda, F callback) {
+    //  Step 0. Normalize ray direction and update _tMax_ accordingly
+    tMax *= Length(ray.d);
+    ray.d = Normalize(ray.d);
+
+    //  Step 1. Perform ratio tracking algorithm
+    Float t = 0.f;
+    SampledSpectrum identity = SampledSpectrum(1.f);
+    SampledSpectrum transmittance = SampledSpectrum(1.f);
+    int evaluations = 0;
+    while (true) {
+        Float zeta = rng.Uniform<Float>();
+        t += SampleExponential(zeta, majorant[0]);
+        if (t >= tMax)
+            break;
+
+        MediumProperties properties = medium->SamplePoint(ray(t), lambda);
+        SampledSpectrum extinction = properties.sigma_a + properties.sigma_s;
+        transmittance *= identity - (extinction / majorant);
+        evaluations++;
+    }
+
+    callback(evaluations);
+
+    return transmittance;
+}
+
+/// <summary>
+/// Schatter voor transmissie op basis van delta-tracking (Spanier et al.)
+/// </summary>
+/// <typeparam name="ConcreteMedium"></typeparam>   Implementatie van het medium in PBRT-v4
+/// <typeparam name="F"></typeparam>                // Ongebruikt, nodig voor compilatie
+/// <param name="alpha"></param>                    Resolutieparameter
+/// <param name="ray"></param>                      Lichtstraal waarover transmissie moet worden geschat
+/// <param name="medium"></param>                   Medium waardoor transmissie moet worden geschat
+/// <param name="tMin"></param>                     Minimale afstand op de lichtstraal
+/// <param name="tMax"></param>                     Maximale afstand op de lichtstraal
+/// <param name="rng"></param>                      Generator voor willekeurige getallen
+/// <param name="lambda"></param>                   Golflengten waarover de transmissie zal worden bepaald
+/// <param name="callback"></param>                 Functie die gebruikt wordt voor statistieken bij te houden
+/// <returns>Transmissie tussen ray(tMin) en ray(tMax)</returns>
+template <typename ConcreteMedium, typename F>
+PBRT_CPU_GPU inline SampledSpectrum DeltaTrackingTransmittanceEstimation(
+    float alpha, Ray ray, ConcreteMedium medium, Float tMin, Float tMax, RNG &rng,
+    SampledSpectrum majorant, const SampledWavelengths &lambda, F callback) {
+    //  Step 0. Normalize ray direction and update _tMax_ accordingly
+    tMax *= Length(ray.d);
+    ray.d = Normalize(ray.d);
+
+    //  Step 1. Perform ratio tracking algorithm
+    Float t = 0.f;
+    Float ksi = rng.Uniform<Float>();
+    SampledSpectrum ratio = SampledSpectrum(0.f);
+    int evaluations = 0;
+    while (ksi > ratio[0]) {
+        Float zeta = rng.Uniform<Float>();
+        t += SampleExponential(zeta, majorant[0]);
+        if (t >= tMax)
+            break;
+
+        MediumProperties properties = medium->SamplePoint(ray(t), lambda);
+        SampledSpectrum extinction = properties.sigma_a + properties.sigma_s;
+        
+        ratio = extinction / majorant;
+        evaluations++;
+    }
+
+    SampledSpectrum transmittance =
+        (t > tMax) ? SampledSpectrum(1.f) : SampledSpectrum(0.f);
+
+    callback(evaluations);
+
+    return transmittance;
+}
+
+/// <summary>
+/// Schatter voor transmissie op basis van vertekende ray-marching (Ketunnen et al.)
+/// </summary>
+/// <typeparam name="ConcreteMedium"></typeparam>   Implementatie van het medium in PBRT-v4
+/// <typeparam name="F"></typeparam>                // Ongebruikt, nodig voor compilatie
+/// <param name="alpha"></param>                    Resolutieparameter
+/// <param name="ray"></param>                      Lichtstraal waarover transmissie moet worden geschat
+/// <param name="medium"></param>                   Medium waardoor transmissie moet worden geschat
+/// <param name="tMin"></param>                     Minimale afstand op de lichtstraal
+/// <param name="tMax"></param>                     Maximale afstand op de lichtstraal
+/// <param name="rng"></param>                      Generator voor willekeurige getallen
+/// <param name="lambda"></param>                   Golflengten waarover de transmissie zal worden bepaald
+/// <param name="callback"></param>                 Functie die gebruikt wordt voor statistieken bij te houden
+/// <returns>Transmissie tussen ray(tMin) en ray(tMax)</returns>
+template <typename ConcreteMedium, typename F>
+PBRT_CPU_GPU inline SampledSpectrum BiasedTransmittanceEstimation(
+    float alpha, Ray ray, ConcreteMedium medium, Float tMin, Float tMax, RNG &rng,
+    SampledSpectrum majorant, const SampledWavelengths &lambda, F callback) {
+    //  Step 0. Normalize ray direction and update _tMax_ accordingly
+    tMax *= Length(ray.d);
+    ray.d = Normalize(ray.d);
+
+    //  Step 1. Compute control optical thickness
+    SampledSpectrum controlOpticalThickness = alpha * majorant * (tMax - tMin);
+
+    //  Step 2. Determine the tuple size using the control optical thickness
+    Float t_control = controlOpticalThickness[0];
+    Float factor = (0.015f * t_control) * (0.65f * t_control) * (60.3f * t_control);
+    Float n_cmf = std::ceil(std::cbrt(factor));
+    int M = static_cast<int>(std::max(1.0f, n_cmf)); 
+        //DetermineTupleSize(controlOpticalThickness[0], 0.9f, 2.0f);
+
+    //  Step 3. Compute random offset (Pauly et al. 2000)
+    Float u = rng.Uniform<Float>();
+
+    //  Step 4.1 Compute optical depth estimate using simple MC estimator
+    Float densitySampleFactor = tMax / M;
+    SampledSpectrum opticalThicknessEstimate(0.f);
+    for (int i = 0; i < M; i++) {
+        Float t = tMin + densitySampleFactor * (u + i);
+        MediumProperties mp = medium->SamplePoint(ray(t), lambda);
+        SampledSpectrum extinction = mp.sigma_a + mp.sigma_s;
+
+        opticalThicknessEstimate += extinction;
+    }
+
+    //  Step 4. Weighing the optical thickness estimate according to biased ray-marching
+    //          transmittance estimation.
+    opticalThicknessEstimate *= -densitySampleFactor;
+
+    //  Step 5. Endpoint matching (Optional)
+    if (M > 8) {
+        MediumProperties eval_0 = medium->SamplePoint(ray(tMin), lambda);
+        SampledSpectrum density_0 = eval_0.sigma_a + eval_0.sigma_s;
+        MediumProperties eval_l = medium->SamplePoint(ray(tMax), lambda);
+        SampledSpectrum density_l = eval_l.sigma_a + eval_l.sigma_s;
+        SampledSpectrum endpointEval = (density_l - density_0);
+        SampledSpectrum endpointMatching =
+            densitySampleFactor * (0.5f - u) * endpointEval;
+        opticalThicknessEstimate = opticalThicknessEstimate - endpointMatching;
+    }
+
+    //  Step 6. Callback for #evals
+    callback(M);
+
+    //  Step 7. Transmittance = exp(opticalThicknessEstimate)
+    return FastExp(opticalThicknessEstimate);
+}
+
+/// <summary>
+/// Schatter voor transmissie op basis van onvertekende ray-marching (Ketunnen et al.)
+/// </summary>
+/// <typeparam name="ConcreteMedium"></typeparam>   Implementatie van het medium in PBRT-v4
+/// <typeparam name="F"></typeparam>                // Ongebruikt, nodig voor compilatie
+/// <param name="alpha"></param>                    Resolutieparameter
+/// <param name="ray"></param>                      Lichtstraal waarover transmissie moet worden geschat
+/// <param name="medium"></param>                   Medium waardoor transmissie moet worden geschat
+/// <param name="tMin"></param>                     Minimale afstand op de lichtstraal
+/// <param name="tMax"></param>                     Maximale afstand op de lichtstraal
+/// <param name="rng"></param>                      Generator voor willekeurige getallen
+/// <param name="lambda"></param>                   Golflengten waarover de transmissie zal worden bepaald
+/// <param name="callback"></param>                 Functie die gebruikt wordt voor statistieken bij te houden
+/// <returns>Transmissie tussen ray(tMin) en ray(tMax)</returns>
+template <typename ConcreteMedium, typename F>
+PBRT_CPU_GPU inline SampledSpectrum UnbiasedTransmittanceEstimation(
+    float alpha, Ray ray, ConcreteMedium medium, Float tMin, Float tMax, RNG &rng,
+    SampledSpectrum majorant, const SampledWavelengths &lambda, F callback) {
+    //  Step 0. Normalize ray direction and update _tMax_ accordingly
+    tMax *= Length(ray.d);
+    ray.d = Normalize(ray.d);
+
+    //  Step 1. Compute control optical thickness
+    SampledSpectrum controlOpticalThickness = alpha * majorant * (tMax - tMin);
+
+    //  Step 2. Determine the tuple size using the control optical thickness
+    int M = DetermineTupleSize(controlOpticalThickness[0], 0.9f, 2.0f);
+
+    //  Step 3. Compute BK weights
+    pstd::vector<Float> weights = AggressiveBhanotKennedyRoulette(0.9f, 2, 2.0f);
+    int N = weights.size();
+
+    //  Step 4. Compute N + 1 optical thickness estimates
+    MediumProperties eval_0 = medium->SamplePoint(ray(tMin), lambda);
+    SampledSpectrum density_0 = eval_0.sigma_a + eval_0.sigma_s;
+    MediumProperties eval_l = medium->SamplePoint(ray(tMax), lambda);
+    SampledSpectrum density_l = eval_l.sigma_a + eval_l.sigma_s;
+    SampledSpectrum endpointEval = (density_l - density_0);
+    Float densitySampleFactor = tMax / M;
+    pstd::vector<SampledSpectrum> opticalThicknessEstimates;
+    for (int i = 0; i < N + 1; i++) {
+        //  Step 4.1 Compute offset (Pauly et al. 2000)
+        Float u_i = rng.Uniform<Float>();
+
+        //  Step 4.2 Compute optical depth estimate using simple MC estimator
+        SampledSpectrum opticalThicknessEstimate(0.f);
+        for (int i = 0; i < M; i++) {
+            Float t = tMin + densitySampleFactor * (u_i + i);
+            MediumProperties mp = medium->SamplePoint(ray(t), lambda);
+            SampledSpectrum extinction = mp.sigma_a + mp.sigma_s;
+
+            opticalThicknessEstimate += extinction;
+        }
+
+        //  Step 4.2 Store the optical thickness estimate
+        opticalThicknessEstimate *= -densitySampleFactor;
+
+        //  Step 4.3 Endpoint matching
+        if (M > 8) {
+            SampledSpectrum endpointMatching =
+                densitySampleFactor * (0.5f - u_i) * endpointEval;
+            opticalThicknessEstimate = opticalThicknessEstimate - endpointMatching;
+        }
+        
+        //  Step 4.4 Save the optical thickness estimate
+        opticalThicknessEstimates.push_back(opticalThicknessEstimate);
+    }
+    
+    //  Step 5. Initialize transmittance as 0.0f
+    SampledSpectrum transmittance(0.f);
+
+    //  Step 6. Compute elementary means on per-pivot base
+    Float sampleWeight = 1.0f / (N + 1);
+    for (int i = 0; i < N + 1; i++) {
+        //  Step 6.1 Select the current estimate to be used as Taylor-series pivot
+        SampledSpectrum pivot = opticalThicknessEstimates[i];
+
+        //  Step 6.2 Collect all other estimates and compute their elementary mean
+        pstd::vector<SampledSpectrum> meanSamples;
+
+        for (int j = 0; j < N + 1; j++) {
+            if (i == j)
+                continue;
+            SampledSpectrum estimate = opticalThicknessEstimates[i] - pivot;
+
+            meanSamples.push_back(estimate);
+        }
+
+        //  Step 6.3 Compute the elementary mean of the samples
+        pstd::vector<SampledSpectrum> means = ElementaryMeans(meanSamples, weights.size());
+
+        //  Step 6.4 Compute control-variate optical thickness (i.e. exponentiated pivot)
+        SampledSpectrum controlSampleTransmittance = FastExp(pivot);
+
+        //  Step 6.5 Compute the residual transmittance
+        SampledSpectrum residualSampleTransmittance = SampledSpectrum(0.f);
+
+        for (int k = 0; k < N; k++) {
+            //  Step 6.5.1 Get the current mean sample
+            SampledSpectrum sample = means[k];
+
+            //  Step 6.5.2 Compute the factor
+            //  !!! Note: The weight index is k + 1 since at index 0, the order N was
+            //  stored !!!
+            Float factor = 1.0f / (Factorial(k) * weights[k]);
+
+            //  Step 6.5.3 Add to the residual transmittance
+            residualSampleTransmittance += factor * sample;
+        }
+
+        //  Step 6.6 Update the segment transmittance
+        transmittance +=
+            sampleWeight * controlSampleTransmittance * residualSampleTransmittance;
+    }
+    
+    //  Step 7. Callback for #evals
+    int evals = N * M + 2;
+    callback(evals);
+
+    //  Step 8. Return the transmittance
+    return transmittance;
+}
+
+/// <summary>
+/// Functie om elementaire symmetrische gemiddelden te berekenen (Kettunen et al.).
+/// </summary>
+/// <param name="samples"></param>          Monsters waarover de elementaire gemiddelden worden berekend
+/// <param name="evaluationOrder"></param>  Orde van ontwikkeling van de Taylorreeks
+/// <returns>Elementaire symmetrische gemiddelden</returns>
+PBRT_CPU_GPU inline pstd::vector<SampledSpectrum> ElementaryMeans(
+    const pstd::vector<SampledSpectrum> &samples, int evaluationOrder) {
+    pstd::vector<SampledSpectrum> means;
+
+    //  Step 0 Important note: We receive N samples here, not N + 1!
+
+    //  Step 1. Initialize m_0 as 1
+    means.push_back(SampledSpectrum(1.f));
+
+    //  Step 2. Initialize m_1 to _evaluationOrder_ as 0
+    for (int i = 1; i <= evaluationOrder; i++)
+        means.push_back(SampledSpectrum(0.f));
+
+    //  Step 2. Compute the means for the N received samples
+    for (int n = 1; n <= samples.size(); n++) {
+        int startIdx = std::min(evaluationOrder, n);
+        for (int k = startIdx; k >= 1; k--) {
+            float factor = static_cast<float>(k) / n;
+
+            means[k] = means[k] + factor * (means[k - 1] * samples[n - 1] - means[k]);
+        }
+    }
+
+    //  Step 5. Return the computed means
+    return means;
+}
+
+/// <summary>
+/// Agressieve Bhanot & Kennedy roulette (Kettunen et al.)
+/// </summary>
+/// <param name="p_z"></param>  Kans om de 0-de orde van de Taylorreeks te ontwikkelen
+/// <param name="K"></param>    K
+/// <param name="c"></param>    Continuiteitsparameter
+/// <returns>Gewichten (/kansen en orde) van de BK roulette</returns>
+PBRT_CPU_GPU inline pstd::vector<Float> AggressiveBhanotKennedyRoulette(Float p_z, int K,
+                                                                        Float c) {
+    //  Initialize the weights vector
+    pstd::vector<Float> weights;
+
+    //  Step 1. Add weight of one to the zeroth order term
+    weights.push_back(1.0f);
+
+    //  Step 2. Expect p_z to be in [0, 1] (if p_z = 0.9, p = 0.1)
+    Float p = 1.0f - p_z;
+
+    //  Step 3. Generate a random number between 0 and 1
+    Float u = static_cast<double>(rand()) / RAND_MAX;
+
+    //  Step 4. Stop at the zeroth order term with probability p_z
+    if (p <= u)
+        return weights;
+
+    //  Step 5.1 Add the weights up until the K-th order term
+    for (int idx = 0; idx < K; ++idx)
+        //  TODO: Check if this has to be 1 / p (which would be weird)
+        weights.push_back(p);
+
+    //  Step 5.2 Update the evaluation order to K
+    weights[0] = static_cast<Float>(K);
+
+    //  Step 6. Add further continuation probabilities
+    int k = K + 1;
+    while (true) {
+        //  Step 6.1 Compute continuation probability and multiply with p
+        p *= std::min(c / k, 1.0f);
+
+        //  Step 6.2 Russian roulette termination
+        if (p <= u) {
+            //  If we break using Russian Roulette, we update the
+            weights[0] = static_cast<Float>(k - 1);
+
+            break;
+        }
+
+        //  Step 6.3 Add the weight
+        weights.push_back(p);
+
+        //  Step 6.4 Increase the evaluation order
+        k += 1;
+    }
+
+    //  Finally, we return the weights
+    return weights;
+}
+
+/// <summary>
+/// Verwachte orde van ontwikkeling voor Bhanot en Kennedy roulette (Kettunen et al.).
+/// </summary>
+/// <param name="p_z"></param>  Kans om de 0-de orde van de Taylorreeks te ontwikkelen
+/// <param name="c"></param>    Continuïteitsparameter
+/// <returns>Verwachte orde van ontwikkeling voor Taylorreeks met Bhanot en Kennedy roulette</returns>
+PBRT_CPU_GPU inline Float BhanotKennedyExpectedEvaluationOrder(Float p_z, Float c) {
+    // Assumed is that K = |_c_|
+    int K = static_cast<int>(std::floor(c));
+    Float t = 1.0f;
+    Float sum = 1.0f;
+    for (int i_k = 1; i_k <= K; i_k++) {
+        t *= c / K;
+        sum += t;
+    }
+
+    Float expected_n = K + (std::exp(c) - sum) / t;
+
+    // Non-zero order are evaluated with probability 1 - p_z
+    return (1.0f - p_z) * expected_n;
+}
+
+/// <summary>
+/// Bepaalt de tupelgrootte M op basis van curve-fitting (Kettunen et al.).
+/// </summary>
+/// <param name="t_control"></param>    Controleerbare optische dichtheid
+/// <param name="p_z"></param>          Kans om de 0-de orde van de Taylorreeks te ontwikkelen
+/// <param name="c"></param>            Continuïteitsparameter
+/// <returns>Tupelgrootte M</returns>
+PBRT_CPU_GPU inline int DetermineTupleSize(Float t_control, Float p_z, Float c) {
+    //  Magic :)
+    Float factor = (0.015f * t_control) * (0.65f * t_control) * (60.3f * t_control);
+    Float n_cmf = std::ceil(std::cbrt(factor));
+    Float n_bk = BhanotKennedyExpectedEvaluationOrder(p_z, c);
+    Float x = std::floor(n_cmf / (n_bk + 1.0f) + 0.5f);
+    int result = static_cast<int>(std::max(1.0f, x));
+    return result;
+}
+
+PBRT_CPU_GPU inline long long Factorial(int n) {
+    if (n == 0)
+        return 1;
+    return n * Factorial(n - 1);
 }
 
 }  // namespace pbrt

@@ -83,7 +83,8 @@ void RenderCPU(BasicScene &parsedScene) {
         Warning("No light sources defined in scene; rendering a black image.");
 
     if (film.Is<GBufferFilm>() && !(parsedScene.integrator.name == "path" ||
-                                    parsedScene.integrator.name == "volpath"))
+                                    parsedScene.integrator.name == "volpath" || 
+                                    parsedScene.integrator.name == "transpath"))
         Warning("GBufferFilm is not supported by the \"%s\" integrator. The channels "
                 "other than R, G, B will be zero.",
                 parsedScene.integrator.name);

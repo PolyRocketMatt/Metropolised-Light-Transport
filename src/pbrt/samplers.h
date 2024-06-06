@@ -635,12 +635,13 @@ class MLTSampler {
   public:
     // MLTSampler Public Methods
     MLTSampler(int mutationsPerPixel, int rngSequenceIndex, Float sigma,
-               Float largeStepProbability, int streamCount)
+               Float largeStepProbability, int streamCount, bool optimise)
         : mutationsPerPixel(mutationsPerPixel),
           rng(MixBits(rngSequenceIndex) ^ MixBits(Options->seed)),
           sigma(sigma),
           largeStepProbability(largeStepProbability),
-          streamCount(streamCount) {}
+          streamCount(streamCount), 
+          optimise(optimise) {}
 
     PBRT_CPU_GPU
     void StartIteration();
@@ -677,6 +678,9 @@ class MLTSampler {
     PBRT_CPU_GPU
     void Accept();
 
+    PBRT_CPU_GPU
+    void UpdateLargeStep();
+
     std::string DumpState() const;
 
     std::string ToString() const {
@@ -687,6 +691,13 @@ class MLTSampler {
             rng, sigma, largeStepProbability, streamCount, X, currentIteration, largeStep,
             lastLargeStepIteration, streamIndex, sampleIndex);
     }
+
+    Float largeStepProbability;
+
+    int acceptedSmallMut = 0;
+    int acceptedLargeMut = 0;
+    int proposedSmallMut = 0;
+    int proposedLargeMut = 0;
 
   protected:
     // MLTSampler Private Declarations
@@ -723,9 +734,11 @@ class MLTSampler {
     // MLTSampler Private Members
     int mutationsPerPixel;
     RNG rng;
-    Float sigma, largeStepProbability;
+    Float sigma;
+    bool optimise;
     int streamCount;
     pstd::vector<PrimarySample> X;
+    pstd::vector<bool> discX;
     int64_t currentIteration = 0;
     bool largeStep = true;
     int64_t lastLargeStepIteration = 0;
@@ -760,7 +773,7 @@ class DebugMLTSampler : public MLTSampler {
     }
 
   private:
-    DebugMLTSampler(int nSampleStreams) : MLTSampler(1, 0, 0.5, 0.5, nSampleStreams) {}
+    DebugMLTSampler(int nSampleStreams) : MLTSampler(1, 0, 0.5, 0.5, nSampleStreams, false) {}
 
     std::vector<Float> u;
 };
