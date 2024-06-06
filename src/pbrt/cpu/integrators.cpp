@@ -339,19 +339,23 @@ SampledSpectrum Integrator::Tr(bool vmlt, Sampler sampler, const Interaction &p0
 
             //  ORM/VRM
             if (vmlt) {
+                //  Sample alpha from primary sample space
+                Float alpha = sampler.Get1D();
+
+                //  Sample the control strategy from primary sample space
+                Float control = sampler.Get1D();
+                int strategy = SampleDiscrete({0, 1, 2, 3, 4}, control);
+
                 SampledSpectrum majorant = GenerateMajorant(
                     0, ray, maxDistance, rng.Uniform<Float>(), rng, lambda, [&] {});
                 SampledSpectrum transmittance =
-                    SampleTransmittance(2, 1.0f, ray, &ray.medium, 0.f, maxDistance,
+                    SampleTransmittance(alpha, control, ray, &ray.medium, 0.f, maxDistance,
                                         rng,
                                         majorant, lambda, [&](int evaluations) {
                                             //  Custom stats
-                                            // camera.GetFilm().AddEvaluations(pixel,
-                                            // evaluations);
-                                            //for (int i = 0; i < evaluations; i++)
-                                            //    ++transmittanceDensityEvaluations;
                                         });
 
+                //  Weird glitch where I have to declare a T_maj...
                 SampledSpectrum T_maj =
                     SampleT_maj(ray, 1.f, rng.Uniform<Float>(), rng, lambda,
                                 [&](Point3f p, MediumProperties mp,
@@ -370,16 +374,7 @@ SampledSpectrum Integrator::Tr(bool vmlt, Sampler sampler, const Interaction &p0
                                     return true;
                                 });
                 
-                T_maj = transmittance;
-
-                LOG_VERBOSE("Ratio: %f, Biased: %f", T_maj[0], transmittance[0]);
-
-                //  Update variance
-                //transmittanceVariance = static_cast<int>(transmittance[0] * 10000.0f);
-                //transmittanceIdentity = 10000;
-
-                //LOG_VERBOSE("Majorant = %f, Transmittance = %f", majorant[0], transmittance[0]);
-                
+                T_maj = transmittance;             
                 Tr *= T_maj / T_maj[0];
                 inv_w *= T_maj / T_maj[0];
             } else {

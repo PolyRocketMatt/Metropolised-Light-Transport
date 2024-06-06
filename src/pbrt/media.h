@@ -809,6 +809,13 @@ PBRT_CPU_GPU SampledSpectrum GenerateMajorant(int mode, Ray ray, Float tMax, Flo
 
 /// <summary>
 /// Genereer de majorant die kan worden gebruikt als controleerbare optische dichtheid.
+/// 
+/// 0 = Max-strategie
+/// 1 = Min-strategie
+/// 2 = Avg-strategie
+/// 3 = Weighed Avg-strategie
+/// 4 = Diff-strategie
+/// 
 /// </summary>
 /// <typeparam name="ConcreteMedium"></typeparam> 
 /// <typeparam name="F"></typeparam>
@@ -834,6 +841,7 @@ PBRT_CPU_GPU SampledSpectrum GenerateMajorant(int mode, Ray ray, Float tMax, Flo
         medium->SampleRay(ray, tMax, lambda);
 
     
+    SampledSpectrum maxMajorant = SampledSpectrum(0.f);
     SampledSpectrum majorant = (mode == 1) ? SampledSpectrum(1000.0f) : SampledSpectrum(0.f);
     
     if (mode == 4)
@@ -851,6 +859,9 @@ PBRT_CPU_GPU SampledSpectrum GenerateMajorant(int mode, Ray ray, Float tMax, Flo
         Float segLength = seg->tMax - seg->tMin;
         Float segRatio = segLength / tMax;
         SampledSpectrum segMaj = seg->sigma_maj;
+
+        if (segMaj[0] > maxMajorant[0])
+            maxMajorant = segMaj;
 
         if (mode == 0 && segMaj[0] > majorant[0]) {
             majorant = segMaj;
@@ -876,6 +887,8 @@ PBRT_CPU_GPU SampledSpectrum GenerateMajorant(int mode, Ray ray, Float tMax, Flo
         majorant = SampledSpectrum(1.0f);
     if (mode == 2)
         majorant /= segments;
+    else if (mode == 4)
+        majorant = maxMajorant - majorant;
 
     return majorant;
 }
